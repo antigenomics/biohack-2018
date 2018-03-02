@@ -1,0 +1,167 @@
+---
+title: "kmer-similarity"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(data.table)
+library(dplyr)
+library(dtplyr)
+library(reshape2)
+library(stringr)
+library(parallel)
+library(ggplot2)
+library(dbscan)
+```
+
+Load similarity scores
+
+```{r}
+scores = fread("../alignment_matrix/vdjam.txt")
+```
+
+Generate 3-mers
+
+```{r}
+aas = unique(scores$aa.1)
+kmers = expand.grid(aa.1 = aas,
+                    aa.2 = aas,
+                    aa.3 = aas) %>%
+  mutate(kmer = paste0(aa.1,aa.2,aa.3)) %>%
+  melt(id.vars="kmer") %>%
+  mutate(pos = str_split_fixed(as.character(variable), fixed("."), 2)[,2], aa = value) %>%
+  select(kmer, pos, aa) %>%
+  as.data.table
+```
+
+Distance based on alignment
+
+```{r}
+compute_dists = function(k) {
+  kmers %>% 
+    filter(kmer == k) %>%
+    mutate(kmer.1 = kmer, aa.1 = aa) %>% 
+    select(-kmer, -aa) %>%
+    merge(kmers %>%
+            mutate(kmer.2 = kmer, aa.2 = aa) %>% 
+            select(-kmer, -aa), by = "pos") %>%
+    merge(scores, by = c("aa.1", "aa.2")) %>%
+    group_by(kmer.1, kmer.2) %>%
+    summarise(score = sum(score)) %>%
+    ungroup
+}
+
+compute_dists("AAA") %>% str
+```
+
+Pairwise distances
+
+```{r}
+kmer_dists = kmers %>% .$kmer %>% unique %>% as.list %>%
+  mclapply(compute_dists, mc.cores = 80) %>%
+  rbindlist
+```
+
+Distribution of scores
+
+```{r}
+kmer_dists %>%
+  mutate(score.i = as.integer(round(score*10))) %>%
+  filter(kmer.1 >= kmer.2) %>%
+  group_by(score.i) %>%
+  summarise(count = n()) %>%
+  ggplot(aes(x = score.i, y = count)) +
+  geom_bar(stat = "identity")
+```
+
+Convert pairwise distances from flat to matrix
+
+```{r}
+mat_kmer_dists = kmer_dists %>%
+  dcast(kmer.1 ~ kmer.2, value.var = "score")
+rownames(mat_kmer_dists) = mat_kmer_dists$kmer.1
+mat_kmer_dists$kmer.1 = NULL
+mat_kmer_dists = as.matrix(mat_kmer_dists)
+```
+
+Convert to distance measure (negate & add max score)
+
+```{r}
+mat_kmer_dists.d = as.dist(-mat_kmer_dists+max(mat_kmer_dists))
+summary(mat_kmer_dists.d)
+```
+
+Get clusters from hclust - they will serve basis for our vector representation
+
+```{r}
+hcl = hclust(mat_kmer_dists.d, method = "ward")
+plot(hcl, cex = 0.1)
+```
+
+```{r}
+clusters25 = cutree(hcl, 25)
+summary(as.factor(clusters25)) # number of elements in cluster
+plot(clusters50)
+
+data.frame(kmer = names(clusters25),
+           cluster = clusters25) %>%
+  fwrite("vdjam_clusters25_ids.txt", sep = "\t")
+
+
+clusters50 = cutree(hcl, 50)
+summary(as.factor(clusters50)) # number of elements in cluster
+plot(clusters50)
+
+data.frame(kmer = names(clusters50),
+           cluster = clusters50) %>%
+  fwrite("vdjam_clusters50_ids.txt", sep = "\t")
+
+clusters100 = cutree(hcl, 100)
+summary(as.factor(clusters100)) # number of elements in cluster
+plot(clusters100)
+
+data.frame(kmer = names(clusters100),
+           cluster = clusters100) %>%
+  fwrite("vdjam_clusters100_ids.txt", sep = "\t")
+```
+
+Compute mean distances to clusters - these will be transformed to values of vector components
+
+```{r}
+kmer_vec = mat_kmer_dists[,0]
+for (cc in unique(clusters25)) {
+  mm = which(clusters25 == cc)
+  kmer_vec = cbind(kmer_vec, rowSums(mat_kmer_dists[, mm]) / 
+                     length(mm))
+}
+colnames(kmer_vec) = paste0("c", unique(clusters25))
+
+cbind(data.table(kmer=rownames(kmer_vec)), signif(kmer_vec, 3)) %>%
+  fwrite("vdjam_clusters25_mean_score.txt", sep = "\t")
+
+kmer_vec = mat_kmer_dists[,0]
+for (cc in unique(clusters50)) {
+  mm = which(clusters50 == cc)
+  kmer_vec = cbind(kmer_vec, rowSums(mat_kmer_dists[, mm]) / 
+                     length(mm))
+}
+colnames(kmer_vec) = paste0("c", unique(clusters50))
+
+cbind(data.table(kmer=rownames(kmer_vec)), signif(kmer_vec, 3)) %>%
+  fwrite("vdjam_clusters50_mean_score.txt", sep = "\t")
+
+kmer_vec = mat_kmer_dists[,0]
+for (cc in unique(clusters100)) {
+  mm = which(clusters100 == cc)
+  kmer_vec = cbind(kmer_vec, rowSums(mat_kmer_dists[, mm]) / 
+                     length(mm))
+}
+colnames(kmer_vec) = paste0("c", unique(clusters100))
+
+cbind(data.table(kmer=rownames(kmer_vec)), signif(kmer_vec, 3)) %>%
+  fwrite("vdjam_clusters100_mean_score.txt", sep = "\t")
+```

@@ -1,0 +1,3 @@
+1. Kmer - frequency comparing
+2. Naive clusterisation of CDR3 (unsuccesfull)
+.......
